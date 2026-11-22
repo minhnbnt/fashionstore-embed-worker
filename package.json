@@ -12,7 +12,6 @@
     "lint:fix": "vp lint --fix",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
-    "proto:sync": "node scripts/sync-proto.mjs",
     "proto:gen": "pnpm exec buf generate",
     "start": "node dist/main.mjs"
   },
@@ -30,6 +29,7 @@
     "@bufbuild/protobuf": "^2.17.0",
     "@bufbuild/protoc-gen-es": "^2.17.0",
     "@bufbuild/protoc-gen-grpc-es": "^0.0.1",
+    "@huggingface/hub": "^2.17.11",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.15.5",
     "jpeg-js": "^0.4.4",

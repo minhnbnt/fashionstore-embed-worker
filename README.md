@@ -17,16 +17,17 @@ Env mặc định trong `.env.example`. Cần Postgres đã migrate tới `V46` 
 
 ## Stub gRPC
 
-Proto canonical vẫn ở `../embed-worker/proto/...`. Sinh TS stub đã commit trong `src/grpc/gen/`:
+Proto được **lưu ngay trong repo** tại `src/grpc/proto/` (bản embedding copy từ canonical
+`../embed-worker/proto/...`, bản health do mình giữ). TS stub đã commit trong `src/grpc/gen/`.
+Sinh lại khi đổi proto:
 
 ```bash
-pnpm proto:sync   # copy proto canonical vào src/grpc/proto
 pnpm proto:gen    # pnpm exec buf generate
 ```
 
 Stub dùng `protoc-gen-es` (`erasable_syntax=true`) + `protoc-gen-grpc-es`, chạy trên
-`@grpc/grpc-js` nên Java backend không đổi. `pnpm proto:sync` rồi `pnpm proto:gen` mỗi khi
-đổi contract.
+`@grpc/grpc-js` nên Java backend không đổi. Test `proto-sync.test.ts` vẫn so hash proto local
+với bản canonical Python để phát hiện lệch; nếu lệch thì copy tay rồi chạy `pnpm proto:gen`.
 
 ## Parity
 
@@ -49,8 +50,9 @@ podman run --rm -p 9091:9091 \
 
 Image dùng `registry.access.redhat.com/hi/nodejs:26-builder` để build và
 `.../hi/nodejs:26` để chạy. Chỉ đóng gói gói native (`sharp`, `onnxruntime-node` CPU
-linux/x64, ~67 MB); phần JS nằm trong `dist/`. Weights ONNX được tải lúc build theo SHA
-pin, chạy hoàn toàn offline với `LOCAL_FILES_ONLY=true`.
+linux/x64, ~67 MB); phần JS nằm trong `dist/`. Weights ONNX được tải lúc build bằng
+`pnpm exec hfjs download` (`@huggingface/hub`, devDependency) theo SHA pin, chạy hoàn toàn
+offline với `LOCAL_FILES_ONLY=true`. Không có script tuỳ biến nào trong repo.
 
 Khi chạy trong compose, đặt `GRPC_BIND_HOST=0.0.0.0` và cho backend Java dùng
 `EMBED_GRPC_ADDRESS=embed-worker:9091`. HEALTHCHECK gọi `dist/grpc-health.mjs` qua service

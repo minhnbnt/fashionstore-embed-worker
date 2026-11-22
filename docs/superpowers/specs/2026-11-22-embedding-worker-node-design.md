@@ -80,9 +80,10 @@ Chọn approach 1, với approach 3 là đường lui đã biết trước.
 
 1. **Vị trí:** repo riêng `/home/minhnbnt/fashionstore/embed-worker-node`. Worker Python giữ
    nguyên làm parity oracle. Proto canonical không đổi.
-2. **Proto:** `scripts/sync-proto.mjs` copy `../embed-worker/proto/fashion_clip/v1/embedding.proto`
-   vào `src/grpc/proto/fashion_clip/v1/embedding.proto` (commit). Test so SHA-256 hai bản.
-   Không sinh stub lúc runtime; dùng `@grpc/proto-loader` nạp file lúc start.
+2. **Proto:** lưu ngay trong repo ở `src/grpc/proto/` (bản embedding copy từ canonical
+   `../embed-worker/proto/...`, bản health tự giữ). Test so SHA-256 hai bản để phát hiện lệch.
+   Không sinh stub lúc runtime, không script trung gian: stub TS đã commit, sinh lại bằng
+   `pnpm proto:gen` (`pnpm exec buf generate`) khi proto đổi.
 3. **Model source:** `MODEL_ID=ff13/fashion-clip`, `MODEL_REVISION` pin SHA, file
    `onnx/vision_model.onnx`, `dtype: 'fp32'` (không quantized), `device: 'cpu'`.
    `session_options: { intraOpNumThreads: 4, interOpNumThreads: 1 }` tương đương
@@ -133,8 +134,10 @@ Chọn approach 1, với approach 3 là đường lui đã biết trước.
     / `:26`. Node 26 không còn Corepack nên cài pnpm bằng `npm install -g` từ `/` (tránh
     `EBADDEVENGINES`). Chạy user 65532. Build stage `pnpm --filter native-runtime deploy
     --prod /native`, xoá binary onnxruntime của platform khác chỉ giữ `linux/x64` (~67 MB
-    native). `dist/` chứa phần JS đã bundle. Weights prefetch theo SHA vào `/models/hub/...`,
-    `LOCAL_FILES_ONLY=true`. `GRPC_BIND_HOST=0.0.0.0` trong container.
+    native). `dist/` chứa phần JS đã bundle. Weights tải lúc build bằng
+    `pnpm exec hfjs download` (`@huggingface/hub`, devDependency) theo SHA vào
+    `/models/hub/...`, `LOCAL_FILES_ONLY=true`. `GRPC_BIND_HOST=0.0.0.0` trong container.
+    Không có thư mục `scripts/` hay script tự viết nào.
 15. **Healthcheck (call của builder):** `src/grpc-health.ts` build thành `dist/grpc-health.mjs`,
     dùng generated `HealthClient` + enum `SERVING`; Docker `HEALTHCHECK` gọi file này.
 
@@ -143,10 +146,12 @@ Chọn approach 1, với approach 3 là đường lui đã biết trước.
 ```
 embed-worker-node/
 ├── package.json, pnpm-workspace.yaml, tsconfig.json, vite.config.ts, .env.example
-├── scripts/sync-proto.mjs
+├── buf.gen.yaml, Dockerfile, .dockerignore, README.md
+├── native-runtime/package.json          # chỉ sharp + onnxruntime-node cho pnpm deploy
 ├── docs/superpowers/specs/... (file này)
 └── src/
-    ├── config.ts, types.ts, container.ts, main.ts
+    ├── config.ts, types.ts, container.ts, main.ts, grpc-health.ts
+    ├── grpc/gen/                         # stub sinh ra, commit
     ├── infrastructure/{db,queue,s3,image,model}.ts
     ├── service/{embedding-jobs,search-embedding}.ts
     ├── grpc/{embedding-service,server}.ts
