@@ -58,7 +58,7 @@ export async function main(): Promise<void> {
     settings.queueName,
     settings.embedBatchSize,
   );
-  console.info(`gRPC server nghe 127.0.0.1:${port}`);
+  console.info(`gRPC server nghe ${settings.grpcBindHost}:${port}`);
 
   try {
     await createWorker(container.processor, settings.embedBatchSize).runForever(() => stopping);

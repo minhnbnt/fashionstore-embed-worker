@@ -5,11 +5,11 @@ export default defineConfig({
     "*": "vp check --fix",
   },
   pack: {
-    entry: ["src/main.ts"],
+    entry: ["src/main.ts", "src/grpc-health.ts"],
     // sharp / onnxruntime-node có native binary: không được bundle.
     deps: {
       alwaysBundle: [/.*/],
-      neverBundle: [/^sharp$/, /^@img\//],
+      neverBundle: [/^sharp$/, /^@img\//, /^onnxruntime-node$/],
     },
     minify: true,
     sourcemap: true,

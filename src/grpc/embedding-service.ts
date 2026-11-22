@@ -2,22 +2,14 @@ import * as grpc from "@grpc/grpc-js";
 
 import type { SearchEmbedder } from "../service/search-embedding";
 import { ImageTooLargeError, InvalidImageError, MODEL_NAME } from "../types";
-
-interface EmbedImageRequest {
-  image: Buffer | Uint8Array;
-}
-
-interface EmbedImageReply {
-  vector: number[];
-  model: string;
-}
+import type { EmbeddingServiceServer } from "./gen/fashion_clip/v1/embedding_grpc";
 
 export function createEmbeddingService(
   embedder: SearchEmbedder,
   maxConcurrency: number,
-): grpc.UntypedServiceImplementation {
+): EmbeddingServiceServer {
   let active = 0;
-  const handler: grpc.handleUnaryCall<EmbedImageRequest, EmbedImageReply> = (call, callback) => {
+  const embedImage: EmbeddingServiceServer["embedImage"] = (call, callback) => {
     if (active >= maxConcurrency) {
       callback({
         code: grpc.status.RESOURCE_EXHAUSTED,
@@ -43,5 +35,5 @@ export function createEmbeddingService(
       }
     })();
   };
-  return { EmbedImage: handler as grpc.UntypedHandleCall };
+  return { embedImage };
 }

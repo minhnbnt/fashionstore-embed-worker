@@ -15,6 +15,7 @@ describe("loadSettings", () => {
     expect(settings.visibilityTimeoutS).toBe(60);
     expect(settings.pollMaxSeconds).toBe(5);
     expect(settings.pollIntervalMs).toBe(100);
+    expect(settings.grpcBindHost).toBe("127.0.0.1");
     expect(settings.grpcPort).toBe(9091);
     expect(settings.grpcMaxConcurrency).toBe(4);
     expect(settings.grpcMaxImageBytes).toBe(8388608);

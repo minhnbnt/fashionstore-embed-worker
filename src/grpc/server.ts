@@ -1,9 +1,9 @@
 import * as grpc from "@grpc/grpc-js";
-import * as protoLoader from "@grpc/proto-loader";
 
 import type { Settings } from "../config";
-
-const PROTO_DIR = "src/grpc/proto";
+import { EmbeddingServiceDefinition } from "./gen/fashion_clip/v1/embedding_grpc";
+import { HealthDefinition, type HealthServer } from "./gen/grpc/health/v1/health_grpc";
+import { HealthCheckResponse_ServingStatus } from "./gen/grpc/health/v1/health_pb";
 
 export interface GrpcServer {
   start(): Promise<number>;
@@ -14,48 +14,25 @@ export async function createGrpcServer(
   settings: Settings,
   embeddingService: grpc.UntypedServiceImplementation,
 ): Promise<GrpcServer> {
-  const loaderOptions: protoLoader.Options = {
-    includeDirs: [PROTO_DIR],
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true,
-  };
-  const embedding = grpc.loadPackageDefinition(
-    protoLoader.loadSync("fashion_clip/v1/embedding.proto", loaderOptions),
-  ) as never;
-  const health = grpc.loadPackageDefinition(
-    protoLoader.loadSync("grpc/health/v1/health.proto", loaderOptions),
-  ) as never;
-
-  const embeddingServiceDefinition = (
-    embedding as Record<string, Record<string, Record<string, { service: grpc.ServiceDefinition }>>>
-  )["fashion_clip"].v1.EmbeddingService.service;
-  const healthServiceDefinition = (
-    health as Record<
-      string,
-      Record<string, Record<string, Record<string, { service: grpc.ServiceDefinition }>>>
-    >
-  )["grpc"].health.v1.Health.service;
-
   const server = new grpc.Server({
     "grpc.max_receive_message_length": settings.grpcMaxImageBytes,
     "grpc.max_send_message_length": settings.grpcMaxImageBytes,
   });
-  server.addService(embeddingServiceDefinition, embeddingService);
-  server.addService(healthServiceDefinition, {
-    Check: (_call: unknown, callback: (error: null, value: { status: number }) => void) => {
-      callback(null, { status: 1 });
+  server.addService(EmbeddingServiceDefinition, embeddingService);
+
+  const health: HealthServer = {
+    check: (_call, callback) => {
+      callback(null, { status: HealthCheckResponse_ServingStatus.SERVING });
     },
-    Watch: (call: { end: () => void }) => {
+    watch: (call) => {
       call.end();
     },
-  });
+  };
+  server.addService(HealthDefinition, health);
 
   const port = await new Promise<number>((resolve, reject) => {
     server.bindAsync(
-      `127.0.0.1:${settings.grpcPort}`,
+      `${settings.grpcBindHost}:${settings.grpcPort}`,
       grpc.ServerCredentials.createInsecure(),
       (error, boundPort) => {
         if (error !== null) {

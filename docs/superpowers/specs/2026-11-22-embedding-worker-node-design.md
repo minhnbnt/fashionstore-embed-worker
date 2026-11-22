@@ -125,6 +125,18 @@ Chọn approach 1, với approach 3 là đường lui đã biết trước.
     `Tensor`. Model ONNX đã được chứng minh khớp torch cosine 1.0 khi cùng `pixel_values`.
 12. **Lỗi/log:** exception/message tiếng Anh; comment tiếng Việt như repo gốc; log một dòng
     mỗi batch và mỗi RPC; không log nội dung ảnh.
+13. **Stub gRPC (call của builder):** sinh TS bằng `protoc-gen-es` (`erasable_syntax=true`,
+    tương thích `erasableSyntaxOnly`) + `protoc-gen-grpc-es` của Buf, chạy qua
+    `pnpm proto:gen` = `pnpm exec buf generate`, commit vào `src/grpc/gen/`. Runtime vẫn là
+    `@grpc/grpc-js` nên Java backend không đổi. Không dùng `@grpc/proto-loader` nữa.
+14. **Container (call của builder):** base `registry.access.redhat.com/hi/nodejs:26-builder`
+    / `:26`. Node 26 không còn Corepack nên cài pnpm bằng `npm install -g` từ `/` (tránh
+    `EBADDEVENGINES`). Chạy user 65532. Build stage `pnpm --filter native-runtime deploy
+    --prod /native`, xoá binary onnxruntime của platform khác chỉ giữ `linux/x64` (~67 MB
+    native). `dist/` chứa phần JS đã bundle. Weights prefetch theo SHA vào `/models/hub/...`,
+    `LOCAL_FILES_ONLY=true`. `GRPC_BIND_HOST=0.0.0.0` trong container.
+15. **Healthcheck (call của builder):** `src/grpc-health.ts` build thành `dist/grpc-health.mjs`,
+    dùng generated `HealthClient` + enum `SERVING`; Docker `HEALTHCHECK` gọi file này.
 
 ## 7. Cấu trúc dự kiến
 

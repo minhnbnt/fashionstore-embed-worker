@@ -1,6 +1,15 @@
+packages:
+  - "."
+  - native-runtime
+
+# pnpm không export .npmrc thành npm_config_* cho lifecycle script, nên cờ
+# ONNXRUNTIME_NODE_INSTALL=skip không đặt qua .npmrc được. Cách pnpm-native:
+# cấm luôn postinstall của onnxruntime-node — script này chỉ tải provider CUDA
+# (~221MB); binary CPU nằm sẵn trong npm tarball.
+strictDepBuilds: false
 allowBuilds:
   esbuild: true
-  onnxruntime-node: true
+  onnxruntime-node: false
   protobufjs: true
   sharp: true
 

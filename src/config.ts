@@ -22,6 +22,7 @@ const schema = z.object({
   VISIBILITY_TIMEOUT_S: z.coerce.number().int().positive().default(60),
   POLL_MAX_SECONDS: z.coerce.number().int().nonnegative().default(5),
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(100),
+  GRPC_BIND_HOST: z.string().default("127.0.0.1"),
   GRPC_PORT: z.coerce.number().int().min(0).default(9091),
   GRPC_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
   GRPC_MAX_IMAGE_BYTES: z.coerce
@@ -48,6 +49,7 @@ export interface Settings {
   visibilityTimeoutS: number;
   pollMaxSeconds: number;
   pollIntervalMs: number;
+  grpcBindHost: string;
   grpcPort: number;
   grpcMaxConcurrency: number;
   grpcMaxImageBytes: number;
@@ -72,6 +74,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     visibilityTimeoutS: values.VISIBILITY_TIMEOUT_S,
     pollMaxSeconds: values.POLL_MAX_SECONDS,
     pollIntervalMs: values.POLL_INTERVAL_MS,
+    grpcBindHost: values.GRPC_BIND_HOST,
     grpcPort: values.GRPC_PORT,
     grpcMaxConcurrency: values.GRPC_MAX_CONCURRENCY,
     grpcMaxImageBytes: values.GRPC_MAX_IMAGE_BYTES,

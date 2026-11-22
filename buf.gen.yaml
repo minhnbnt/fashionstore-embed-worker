@@ -1,0 +1,12 @@
+version: v2
+inputs:
+  - directory: src/grpc/proto
+plugins:
+  - local: protoc-gen-es
+    out: src/grpc/gen
+    opt:
+      - target=ts
+      - erasable_syntax=true
+  - local: protoc-gen-grpc-es
+    out: src/grpc/gen
+    opt: target=ts

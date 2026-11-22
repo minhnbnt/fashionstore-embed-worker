@@ -4,14 +4,15 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import type { SearchEmbedder } from "../service/search-embedding";
 import { ImageTooLargeError, InvalidImageError, MODEL_NAME } from "../types";
 import { createEmbeddingService } from "./embedding-service";
+import type { EmbeddingServiceServer } from "./gen/fashion_clip/v1/embedding_grpc";
 
 function fakeEmbedder(implementation: () => Promise<number[]>): SearchEmbedder {
   return { embed: vi.fn(implementation) } as unknown as SearchEmbedder;
 }
 
-function invoke(service: grpc.UntypedServiceImplementation, image: Buffer) {
+function invoke(service: EmbeddingServiceServer, image: Buffer) {
   return new Promise<{ error: grpc.ServiceError | null; value: unknown }>((resolve) => {
-    const handler = service.EmbedImage as unknown as (...args: unknown[]) => void;
+    const handler = service.embedImage as unknown as (...args: unknown[]) => void;
     handler(
       { request: { image } },
       (error: grpc.ServiceError | null, value: unknown) => resolve({ error, value }),
