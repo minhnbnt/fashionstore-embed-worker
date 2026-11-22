@@ -22,7 +22,7 @@ const schema = z.object({
   VISIBILITY_TIMEOUT_S: z.coerce.number().int().positive().default(60),
   POLL_MAX_SECONDS: z.coerce.number().int().nonnegative().default(5),
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(100),
-  GRPC_PORT: z.coerce.number().int().positive().default(9091),
+  GRPC_PORT: z.coerce.number().int().min(0).default(9091),
   GRPC_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
   GRPC_MAX_IMAGE_BYTES: z.coerce
     .number()
