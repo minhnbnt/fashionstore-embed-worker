@@ -1,0 +1,155 @@
+# Embedding worker — bản port Node.js (PoC)
+
+Ngày: 2026-11-22
+
+## 1. Ý định và lý do
+
+PoC port worker Python `/home/minhnbnt/fashionstore/embed-worker` sang Node.js, giữ nguyên
+hành vi observes được: tiêu thụ queue pgmq `embed_jobs`, tải ảnh sản phẩm từ S3, tính embedding
+Fashion-CLIP 512 chiều đã L2-normalize, ghi vào bảng `product_embedding`; đồng thời serve RPC
+gRPC `EmbedImage` + health cho Java backend dùng ở luồng search bằng ảnh.
+
+Lý do: thử một runtime duy nhất cho worker, bỏ torch/Python khỏi image deploy. Đây là PoC đánh
+giá khả thi, chưa phải bản thay production.
+
+Thành công khi:
+
+- Cùng một ảnh, vector Node và Python có cosine similarity ≥ 0.9999 (parity gate).
+- Toàn bộ test hành vi của worker Python được port sang vitest và xanh.
+- Java backend gọi gRPC vào worker Node mà không đổi code, `./gradlew test` vẫn xanh
+  (đặc biệt `ProtoSyncTest`).
+- Chạy được `python -m app.worker.main` và bản Node thay phiên trên cùng queue không làm
+  sai khác kết quả.
+
+## 2. Mục tiêu, non-goal, anti-goal
+
+**Mục tiêu:** parity hành vi + parity vector + hợp nhất runtime.
+
+**Non-goal:** Dockerfile/compose, migration Flyway, thay đổi Java backend, thay đổi frontend,
+cắt traffic production, scale ngang, quantized model, text embedding, HTTP API.
+
+**Anti-goal (sẽ coi là thất bại dù chạy được):**
+
+- Vector Node sai khác Python đến mức search trả kết quả khác thứ tự.
+- Bỏ qua guard stale `upload_id` rồi ghi vector của ảnh cũ đè lên ảnh mới.
+- Đổi proto khiến `ProtoSyncTest` bên Java đỏ.
+- Giữ Python inference ẩn bên trong ("full Node" mà thực ra không phải).
+
+## 3. Ràng buộc và nền tảng hiện có
+
+- Node 26.13.1, pnpm 12.22.0. Dùng vite-plus 1.7.0 theo mẫu `ai-backend`
+  (`package.json`, `tsconfig.json`, `vite.config.ts`, `pnpm-workspace.yaml` copypattern).
+- Contract proto canonical nằm ở `../embed-worker/proto/fashion_clip/v1/embedding.proto`.
+  `backend/src/test/.../ProtoSyncTest.java` so SHA-256 với `backend/src/main/proto/...`.
+  Không sửa proto.
+- Backend Java: `EmbeddingClient` gọi stub `fashion_clip.v1.EmbeddingService/EmbedImage`,
+  chờ 512 float, map `INVALID_ARGUMENT`→400, `RESOURCE_EXHAUSTED`→413,
+  `UNAVAILABLE`/`DEADLINE_EXCEEDED`→503, nội dung khác→502. Deadline mặc định 5s.
+  Channel plaintext tới `127.0.0.1:9091`, không auth.
+- Schema do `V46__product_embedding.sql` định nghĩa: queue + bảng + trigger producer đã có,
+  PoC không đụng. `embedding vector(512)` nullable, `embed_error TEXT`, CHECK có một trong hai.
+- pgmq là SQL extension, không có client Node chính thức. Dùng `pg` gọi trực tiếp
+  `pgmq.read(queue_name, vt, qty)` trả `msg_id`, `read_ct`, `message jsonb`; `pgmq.archive`.
+- Env mặc định giữ nguyên tên/giá trị của worker Python (xem `embed-worker/app/config.py`).
+
+## 4. Phát hiện quan trọng về model
+
+- Repo gốc `patrickjohncyh/fashion-clip`, revision pin
+  `7e3ba62ce16b379a1ab479346b66f192e76f51b7`, chỉ có `onnx/model.onnx` (text tower).
+  **Không có `vision_model.onnx`** → transformers.js không tính được image feature từ bản này.
+- `ff13/fashion-clip` (`https://huggingface.co/ff13/fashion-clip`) README ghi rõ là bản convert
+  ONNX của `patrickjohncyh/fashion-clip`, có:
+  `onnx/vision_model.onnx`, `onnx/vision_model_quantized.onnx`,
+  `onnx/text_model.onnx`, `onnx/config.json`, `onnx/preprocessor_config.json`.
+  Config `projection_dim: 512`, `vision_config` là CLIP ViT-B/32 — khớp worker Python.
+- Vì là bản convert của bên thứ ba, SHA phải pin trong config và parity phải đo, không được tin
+  rằng "convert là bằng nhau". Nếu parity fail: tự export ONNX từ SHA pin của repo gốc bằng
+  `optimum` (approach 3) rồi tự host artifact, hoặc dừng lại hỏiMain Partner.
+
+## 5. Approaches đã cân nhắc
+
+| Approach | Mô tả | Đánh giá |
+| --- | --- | --- |
+| 1. Full Node + transformers.js (đã chọn) | `@huggingface/transformers` + ONNX, `sharp`, `pg`, AWS SDK v3, grpc-js | Một runtime, đúng mục tiêu; rủi ro duy nhất là parity, đã chặn bằng gate |
+| 2. Node shell + Python inference | Node làm queue/gRPC/DB, gọi Python qua stdio | Parity chắc nhưng vi phạm anti-goal, bị loại |
+| 3. Full Node + tự export ONNX | Export từ SHA pin bằng optimum, tự host | Dự phòng nếu approach 1 fail parity; tốn công artifact |
+
+Chọn approach 1, với approach 3 là đường lui đã biết trước.
+
+## 6. Quyết định đã chốt (builder không cần hỏi lại)
+
+1. **Vị trí:** repo riêng `/home/minhnbnt/fashionstore/embed-worker-node`. Worker Python giữ
+   nguyên làm parity oracle. Proto canonical không đổi.
+2. **Proto:** `scripts/sync-proto.mjs` copy `../embed-worker/proto/fashion_clip/v1/embedding.proto`
+   vào `src/grpc/proto/fashion_clip/v1/embedding.proto` (commit). Test so SHA-256 hai bản.
+   Không sinh stub lúc runtime; dùng `@grpc/proto-loader` nạp file lúc start.
+3. **Model source:** `MODEL_ID=ff13/fashion-clip`, `MODEL_REVISION` pin SHA, file
+   `onnx/vision_model.onnx`, `dtype: 'fp32'` (không quantized), `device: 'cpu'`.
+   `session_options: { intraOpNumThreads: 4, interOpNumThreads: 1 }` tương đương
+   `torch.set_num_threads(4)`. Cache: `env.localModelPath` + `env.allowRemoteModels = false`
+   bật bởi `LOCAL_FILES_ONLY=true`, ánh xạ `HF_HOME` → `MODEL_CACHE_DIR`.
+4. **Ảnh:** `sharp(buf).raw().toBuffer({ resolveWithObject: true })` → `new RawImage(data,
+   width, height, 3)`. Validate bytes rỗng và > 8MB trước decode. Giữ batch 16, gọi model một
+   lần cho cả batch.
+5. **Queue:** tự long-poll: lặp `SELECT * FROM pgmq.read($1,$2,$3)` cách nhau 100ms tới tối đa
+   5s, trả ngay khi có row. Payload hỏng → archive ngay, không chặn batch. `read_ct` lấy từ
+   server. `msg_id` bigint → đọc bằng `String` rồi convert an toàn (`pg.types.setTypeParser(20)`).
+6. **Vector:** serialize thành `'[v1,v2,...]'` và cast `::vector` trong SQL; không dùng ORM.
+   L2-normalize bằng `Float32Array`, cùng công thức `v / ||v||` của Python.
+7. **gRPC:** `@grpc/grpc-js` + `@grpc/proto-loader`; bundle thêm `grpc/health/v1/health.proto`
+   (Check → SERVING, Watch → unimplemented). Bind `127.0.0.1:${GRPC_PORT}`; options
+   `grpc.max_receive_message_length` / `grpc.max_send_message_length` = 8MB. Giới hạn 4 RPC
+   đồng thời bằng semaphore nhỏ (grpc-js không có cờ `maximum_concurrent_rpcs` tương đương).
+8. **Shutdown:** SIGTERM/SIGINT dừng poll trước → chờ batch hiện tại xong → `tryShutdown`
+   với grace 5s rồi `forceShutdown` → đóng `pg.Pool`.
+9. **Test:** vitest (`vp test run`). Unit dùng fake theo interface (không cần model thật):
+   batch success một lần gọi model, normalize, archive; retry ở `read_ct < 3`; lần 3 ghi
+   `embed_error` + archive; stale upload_id; ảnh bị xoá; upsert xoá `embed_error`; batch rỗng;
+   long-poll; gRPC in-process với stub thật + map lỗi; hash proto. Parity là integration test
+   opt-in (`RUN_PARITY=1`) so fixture vector Python đã lưu sẵn.
+10. **Fixtures parity (call của builder):** 16 ảnh thật lấy từ
+    `backend/data/marketplace-import/images/lazada/`, copy vào `embed-worker-node/test-fixtures/images/`.
+    Oracle vector do chính worker Python (`../embed-worker`, weights `patrickjohncyh` đã cache
+    locally) sinh ra bằng **một lần gọi batch 16**, lưu `test-fixtures/python-vectors.json`
+    (mảng 16 × 512 số). Oracle là code Python cũ, không phải code Node đang test → gate độc
+    lập. Test parity chạy cả hai đường: batch 16 (so từng vector, cosine ≥ 0.9999) và
+    single-image (vector[0]). Nhờ đó rủi ro kernel batch ở §9 được đo, không chỉ đường đơn lẻ.
+11. **Lỗi/log:** exception/message tiếng Anh; comment tiếng Việt như repo gốc; log một dòng
+    mỗi batch và mỗi RPC; không log nội dung ảnh.
+
+## 7. Cấu trúc dự kiến
+
+```
+embed-worker-node/
+├── package.json, pnpm-workspace.yaml, tsconfig.json, vite.config.ts, .env.example
+├── scripts/sync-proto.mjs
+├── docs/superpowers/specs/... (file này)
+└── src/
+    ├── config.ts, types.ts, container.ts, main.ts
+    ├── infrastructure/{db,queue,s3,image,model}.ts
+    ├── service/{embedding-jobs,search-embedding}.ts
+    ├── grpc/{embedding-service,server}.ts
+    │   └── proto/fashion_clip/v1/embedding.proto
+    │   └── proto/grpc/health/v1/health.proto
+    └── **/*.test.ts
+```
+
+## 8. Trình tự triển khai (ý tưởng cho plan)
+
+1. Scaffold vite-plus, config, types, sync proto, test config.
+2. Parity spike: load ONNX, chạy vài ảnh fixture, so với vector Python. **Gate** trước khi viết
+   tiếp phần còn lại. Nếu fail → approach 3.
+3. Infrastructure: db + queue (+ long-poll test), s3, image, model.
+4. Service: embedding-jobs + search-embedding với fake.
+5. gRPC server + servicer + health + in-process test.
+6. main.ts: composition root, signal handling, graceful shutdown.
+7. Kiểm chứng: `vp check`, `vp test run`, `vp pack`, và `./gradlew test` ở backend.
+
+## 9. Rủi ro đã biết
+
+- ONNX vision fp32 ~352MB (`onnx/vision_model.onnx`, bản quantized ~89MB nhưng không dùng);
+  load lạnh chậm; PoC chấp nhận, đo latency và ghi lại.
+- Batch 16 qua transformers.js có thể khác nhẹ so với torch do kernel ONNX; parity gate đo
+  cosine ≥ 0.9999 (sai số float chấp nhận được), không yêu cầu bit-equal.
+- `ff13` là repo bên thứ ba có thể biến mất/đổi file; pin SHA + prefetch vào cache vào PoC.
+- Bigint msg_id của pgmq dễ thành `number` sai ở Node; đã chặn bằng type parser.
