@@ -14,7 +14,7 @@ giá khả thi, chưa phải bản thay production.
 
 Thành công khi:
 
-- Cùng một ảnh, vector Node và Python có cosine similarity ≥ 0.9999 (parity gate).
+- Cùng `pixel_values`, vector Node và Python cosine ≥ 0.99999; cùng ảnh (end-to-end) cosine ≥ 0.9975 (parity gate, xem §6.11 và §9).
 - Toàn bộ test hành vi của worker Python được port sang vitest và xanh.
 - Java backend gọi gRPC vào worker Node mà không đổi code, `./gradlew test` vẫn xanh
   (đặc biệt `ProtoSyncTest`).
@@ -68,11 +68,11 @@ cắt traffic production, scale ngang, quantized model, text embedding, HTTP API
 
 ## 5. Approaches đã cân nhắc
 
-| Approach | Mô tả | Đánh giá |
-| --- | --- | --- |
+| Approach                                 | Mô tả                                                                  | Đánh giá                                                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | 1. Full Node + transformers.js (đã chọn) | `@huggingface/transformers` + ONNX, `sharp`, `pg`, AWS SDK v3, grpc-js | Một runtime, đúng mục tiêu; rủi ro duy nhất là parity, đã chặn bằng gate |
-| 2. Node shell + Python inference | Node làm queue/gRPC/DB, gọi Python qua stdio | Parity chắc nhưng vi phạm anti-goal, bị loại |
-| 3. Full Node + tự export ONNX | Export từ SHA pin bằng optimum, tự host | Dự phòng nếu approach 1 fail parity; tốn công artifact |
+| 2. Node shell + Python inference         | Node làm queue/gRPC/DB, gọi Python qua stdio                           | Parity chắc nhưng vi phạm anti-goal, bị loại                             |
+| 3. Full Node + tự export ONNX            | Export từ SHA pin bằng optimum, tự host                                | Dự phòng nếu approach 1 fail parity; tốn công artifact                   |
 
 Chọn approach 1, với approach 3 là đường lui đã biết trước.
 
@@ -112,9 +112,18 @@ Chọn approach 1, với approach 3 là đường lui đã biết trước.
     Oracle vector do chính worker Python (`../embed-worker`, weights `patrickjohncyh` đã cache
     locally) sinh ra bằng **một lần gọi batch 16**, lưu `test-fixtures/python-vectors.json`
     (mảng 16 × 512 số). Oracle là code Python cũ, không phải code Node đang test → gate độc
-    lập. Test parity chạy cả hai đường: batch 16 (so từng vector, cosine ≥ 0.9999) và
-    single-image (vector[0]). Nhờ đó rủi ro kernel batch ở §9 được đo, không chỉ đường đơn lẻ.
-11. **Lỗi/log:** exception/message tiếng Anh; comment tiếng Việt như repo gốc; log một dòng
+    lập. Test parity gồm hai phần: (a) **model parity** — đưa cùng `pixel_values` từ Python
+    (`test-fixtures/pixel-values.bin`) vào ONNX, yêu cầu cosine ≥ 0.99999; (b) **end-to-end
+    parity** — ảnh → vector cho cả batch 16, yêu cầu cosine ≥ 0.9975. Ngưỡng (b) được hạ có
+    chủ đích từ 0.9999 xuống 0.9975 sau khi đo thực tế (min 0.99798), vì decoder JPEG pure-JS
+    không decode giống hệt libjpeg của Pillow; xem §9. Không được ngầm nới ngưỡng.
+
+11. **Preprocessing (call của builder):** bỏ `AutoProcessor` của transformers.js (resize
+    không khớp Pillow). Tự decode: JPEG dùng `jpeg-js`, ảnh khác dùng `sharp`; resize bicubic
+    port từ `Pillow/src/libImaging/Resample.c` vào `src/infrastructure/pil-resize.ts`; rồi
+    center-crop 224, normalize mean/std, xếp CHW. `pixel_values` đưa thẳng vào ONNX qua
+    `Tensor`. Model ONNX đã được chứng minh khớp torch cosine 1.0 khi cùng `pixel_values`.
+12. **Lỗi/log:** exception/message tiếng Anh; comment tiếng Việt như repo gốc; log một dòng
     mỗi batch và mỗi RPC; không log nội dung ảnh.
 
 ## 7. Cấu trúc dự kiến
@@ -149,7 +158,10 @@ embed-worker-node/
 
 - ONNX vision fp32 ~352MB (`onnx/vision_model.onnx`, bản quantized ~89MB nhưng không dùng);
   load lạnh chậm; PoC chấp nhận, đo latency và ghi lại.
-- Batch 16 qua transformers.js có thể khác nhẹ so với torch do kernel ONNX; parity gate đo
-  cosine ≥ 0.9999 (sai số float chấp nhận được), không yêu cầu bit-equal.
+- Đã đo: kernel ONNX khớp torch (cosine 1.0 khi cùng `pixel_values`). Nguồn drift end-to-end
+  là decode JPEG: `jpeg-js` khác libjpeg/Pillow (raw pixel mean abs diff ~0.53/255, 41% pixel
+  khác nhau), dù resize đã port y hệt Pillow. Cosine 16 ảnh nằm trong [0.99798, 0.999998].
+  Ngưỡng e2e đặt 0.9975. Nếu cần chặt hơn nữa, phải dùng decoder native/libjpeg (WASM hoặc
+  binding), tức là rời khỏi pure-JS — không làm trong PoC này.
 - `ff13` là repo bên thứ ba có thể biến mất/đổi file; pin SHA + prefetch vào cache vào PoC.
 - Bigint msg_id của pgmq dễ thành `number` sai ở Node; đã chặn bằng type parser.

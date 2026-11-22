@@ -38,13 +38,25 @@ function toJob(row: Record<string, unknown>): QueuedJob | null {
 }
 
 export class PgmqJobQueue implements JobQueue {
+  private readonly pool: Pool;
+  private readonly queueName: string;
+  private readonly pollMaxSeconds: number;
+  private readonly pollIntervalMs: number;
+  private readonly sleep: Sleep;
+
   constructor(
-    private readonly pool: Pool,
-    private readonly queueName: string,
-    private readonly pollMaxSeconds: number,
-    private readonly pollIntervalMs: number,
-    private readonly sleep: Sleep = defaultSleep,
-  ) {}
+    pool: Pool,
+    queueName: string,
+    pollMaxSeconds: number,
+    pollIntervalMs: number,
+    sleep: Sleep = defaultSleep,
+  ) {
+    this.pool = pool;
+    this.queueName = queueName;
+    this.pollMaxSeconds = pollMaxSeconds;
+    this.pollIntervalMs = pollIntervalMs;
+    this.sleep = sleep;
+  }
 
   async readBatch(qty: number, visibilityTimeoutS: number): Promise<QueuedJob[]> {
     const deadline = Date.now() + this.pollMaxSeconds * 1000;

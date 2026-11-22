@@ -23,7 +23,11 @@ function serializeVector(vector: Float32Array): string {
 }
 
 export class PostgresProductImageRepository implements ProductImageRepository {
-  constructor(private readonly db: Database) {}
+  private readonly db: Database;
+
+  constructor(db: Database) {
+    this.db = db;
+  }
 
   async getImage(productImageId: string): Promise<ProductImageRef | null> {
     const { rows } = await this.db.connection.query(
@@ -45,11 +49,7 @@ export class PostgresProductImageRepository implements ProductImageRepository {
     };
   }
 
-  async upsertEmbedding(
-    job: QueuedJob,
-    vector: Float32Array,
-    model: string,
-  ): Promise<boolean> {
+  async upsertEmbedding(job: QueuedJob, vector: Float32Array, model: string): Promise<boolean> {
     const result = await this.db.connection.query(
       `INSERT INTO product_embedding
           (product_image_id, product_id, upload_id, embedding, model)

@@ -6,9 +6,7 @@ describe("loadSettings", () => {
   it("giữ default khớp worker Python", () => {
     const settings = loadSettings({});
 
-    expect(settings.databaseUrl).toBe(
-      "postgresql://postgres:postgres@localhost:5432/fashionstore",
-    );
+    expect(settings.databaseUrl).toBe("postgresql://postgres:postgres@localhost:5432/fashionstore");
     expect(settings.s3Bucket).toBe("fashionstore");
     expect(settings.modelId).toBe("ff13/fashion-clip");
     expect(settings.queueName).toBe("embed_jobs");

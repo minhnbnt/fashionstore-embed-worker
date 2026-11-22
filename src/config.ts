@@ -24,7 +24,11 @@ const schema = z.object({
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(100),
   GRPC_PORT: z.coerce.number().int().positive().default(9091),
   GRPC_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
-  GRPC_MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(8 * 1024 * 1024),
+  GRPC_MAX_IMAGE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(8 * 1024 * 1024),
 });
 
 export interface Settings {

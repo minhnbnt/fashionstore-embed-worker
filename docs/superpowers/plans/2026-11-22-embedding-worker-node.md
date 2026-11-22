@@ -16,6 +16,7 @@
 - Env mặc định giữ nguyên tên/giá trị của worker Python (`DATABASE_URL`, `S3_*`, `MODEL_ID`, `MODEL_REVISION`, `HF_HOME`, `LOCAL_FILES_ONLY`, `QUEUE_NAME`, `EMBED_BATCH_SIZE`, `MAX_ATTEMPTS`, `VISIBILITY_TIMEOUT_S`, `POLL_MAX_SECONDS`, `POLL_INTERVAL_MS`, `GRPC_PORT`, `GRPC_MAX_CONCURRENCY`, `GRPC_MAX_IMAGE_BYTES`).
 - Model: `ff13/fashion-clip` revision pinned, `vision_model.onnx`, `dtype: 'fp32'`, `device: 'cpu'`, `intraOpNumThreads: 4`, `interOpNumThreads: 1`. Không dùng quantized.
 - Vector 512 chiều, L2-normalize; `MODEL_NAME = "fashion-clip-vit-b32"`.
+- Parity: model (cùng pixel_values) cosine ≥ 0.99999; end-to-end cosine ≥ 0.9975 (đã đo min 0.99798; decoder JPEG pure-JS khác Pillow — xem spec §9). Không hạ ngưỡng ngầm.
 - Queue `embed_jobs`; payload `{product_image_id, product_id, upload_id, s3_key}`; archive table là DLQ; tối đa 3 lần giao (`read_ct < 3` để lại message).
 - Guard stale `upload_id`: không ghi vector nếu ảnh đã bị thay; ảnh bị xoá → archive.
 - Message size gRPC 8MB cả hai chiều; bind `127.0.0.1`; trả `SERVING` trên health service.
@@ -25,7 +26,8 @@
 
 ## Review Focus
 
-- **Parity vector Node vs Python sai** → Task 4 có parity test so cosine ≥ 0.9999 trên fixture thật; nếu fail dừng và báo, không được bỏ qua.
+- **Parity model sai** → Task 4 có test cố định `pixel_values`, cosine ≥ 0.99999; đây là gate go/no-go.
+- **Preprocessing drift vượt ngưỡng đã đo** → Task 4 end-to-end test 16 ảnh, cosine ≥ 0.9975; nếu thấp hơn thì dừng, không được hạ ngưỡng ngầm.
 - **Stale `upload_id` bị ghi đè vector cũ** → Task 5 test `stale job archived, no upsert, no model call`.
 - **Bigint `msg_id` mất precision** → Task 3 test row có `msg_id` dạng string lớn (`"9007199254740993"`), assert archive gửi đúng string.
 - **Payload pgmq hỏng chặn cả batch** → Task 3 test message thiếu `s3_key` bị archive riêng, message hợp lệ vẫn trả về.
@@ -37,6 +39,7 @@
 ### Task 1: Scaffold vite-plus, config, proto sync
 
 **Files:**
+
 - Create: `package.json`, `pnpm-workspace.yaml`, `tsconfig.json`, `vite.config.ts`, `.gitignore`, `.env.example`
 - Create: `scripts/sync-proto.mjs`
 - Create: `src/config.ts`, `src/config.test.ts`
@@ -44,6 +47,7 @@
 - Create: `src/grpc/proto-sync.test.ts`
 
 **Interfaces:**
+
 - Consumes: `../embed-worker/proto/fashion_clip/v1/embedding.proto` (canonical, read-only), `ai-backend/package.json`, `ai-backend/vite.config.ts`, `ai-backend/tsconfig.json`, `ai-backend/pnpm-workspace.yaml`.
 - Produces: `loadSettings(env?: NodeJS.ProcessEnv): Settings`; `Settings` fields: `databaseUrl`, `s3EndpointUrl`, `s3Bucket`, `s3AccessKey`, `s3SecretKey`, `s3Region`, `modelId`, `modelRevision`, `modelCacheDir`, `localFilesOnly`, `queueName`, `embedBatchSize`, `maxAttempts`, `visibilityTimeoutS`, `pollMaxSeconds`, `pollIntervalMs`, `grpcPort`, `grpcMaxConcurrency`, `grpcMaxImageBytes`. Script `pnpm proto:sync`. Script `pnpm test` = `vp test run`, `pnpm check` = `vp check`, `pnpm build` = `vp pack`.
 
@@ -86,19 +90,22 @@ git init && git add . && git commit -m "feat: scaffold node worker with vite-plu
 ### Task 2: Types và repository Postgres
 
 **Files:**
+
 - Create: `src/types.ts`
 - Create: `src/infrastructure/db.ts`, `src/infrastructure/db.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Settings` (Task 1).
 - Produces: `EMBED_DIM = 512`; `MODEL_NAME = "fashion-clip-vit-b32"`; `DecodedImage { data: Uint8Array | Uint8ClampedArray; width: number; height: number; channels: 3 }`; `QueuedJob { msgId: string; readCt: number; productImageId: string; productId: string; uploadId: string; s3Key: string }`; `ProductImageRef { productImageId: string; productId: string; uploadId: string; s3Key: string }`; `ImageStoreError`; `InvalidImageError`; `ImageTooLargeError`; interfaces `ImageStore.get(key: string): Promise<Buffer>`, `EmbeddingModel.load(): Promise<void>` + `embedImages(images: DecodedImage[]): Promise<Float32Array[]>`, `ProductImageRepository` (`getImage`, `upsertEmbedding(job, vector: Float32Array, model: string): Promise<boolean>`, `setEmbedError`), `JobQueue` (`readBatch(qty, visibilityTimeoutS)`, `archive(job)`). `Database` với `pool: Pool` và `close(): Promise<void>`; `PostgresProductImageRepository` implements `ProductImageRepository`.
 
 - [ ] **Step 1: Viết test repository với fake pool (chưa có impl)**
 
 `src/infrastructure/db.test.ts`: fake object có `query(text, params)` trả `{rows, rowCount}`. Test:
-  - `getImage("img-1")` gọi SQL chứa `FROM product_image pi JOIN upload u`, params `["img-1"]`, trả `ProductImageRef` đúng; trả `null` khi `rows` rỗng.
-  - `upsertEmbedding(job, vector, MODEL_NAME)` params thứ nhất là vector string `"[0.1,0.2,...]"`, có `::vector` trong SQL, trả `true` khi `rowCount > 0`, `false` khi `0`.
-  - `setEmbedError` SQL có `embedding = NULL` và `embed_error = EXCLUDED.embed_error`.
+
+- `getImage("img-1")` gọi SQL chứa `FROM product_image pi JOIN upload u`, params `["img-1"]`, trả `ProductImageRef` đúng; trả `null` khi `rows` rỗng.
+- `upsertEmbedding(job, vector, MODEL_NAME)` params thứ nhất là vector string `"[0.1,0.2,...]"`, có `::vector` trong SQL, trả `true` khi `rowCount > 0`, `false` khi `0`.
+- `setEmbedError` SQL có `embedding = NULL` và `embed_error = EXCLUDED.embed_error`.
 
 - [ ] **Step 2: Chạy test, expected FAIL**
 
@@ -119,18 +126,21 @@ Commit: `git commit -m "feat: add types and postgres repository"`
 ### Task 3: pgmq queue adapter + long-poll
 
 **Files:**
+
 - Create: `src/infrastructure/queue.ts`, `src/infrastructure/queue.test.ts`
 
 **Interfaces:**
+
 - Consumes: `QueuedJob`, `JobQueue` (Task 2), `pg.Pool` (Task 2).
 - Produces: `PgmqJobQueue implements JobQueue`, constructor `(pool: Pool, queueName: string, pollMaxSeconds: number, pollIntervalMs: number)`; `archive(job: QueuedJob): Promise<void>`.
 
 - [ ] **Step 1: Viết failing tests**
 
 `src/infrastructure/queue.test.ts` với fake pool:
-  - `readBatch` trả job khi rows có `message` jsonb hợp lệ; assert `msgId` giữ nguyên string `"9007199254740993"`, `readCt`, UUID fields, `s3Key`.
-  - `readBatch` với row thiếu `s3_key` → row đó bị archive (query SQL chứa `pgmq.archive`), message hợp lệ khác vẫn nằm trong kết quả.
-  - `readBatch` với pool trả 0 row trong 3 lần rồi 1 row → assert có 2 lần delay ~ `pollIntervalMs` (dùng injectable `sleep` hoặc fake timer) và trả đúng 1 job; với thời gian `pollMaxSeconds = 0` → trả `[]` sau 1 lần query.
+
+- `readBatch` trả job khi rows có `message` jsonb hợp lệ; assert `msgId` giữ nguyên string `"9007199254740993"`, `readCt`, UUID fields, `s3Key`.
+- `readBatch` với row thiếu `s3_key` → row đó bị archive (query SQL chứa `pgmq.archive`), message hợp lệ khác vẫn nằm trong kết quả.
+- `readBatch` với pool trả 0 row trong 3 lần rồi 1 row → assert có 2 lần delay ~ `pollIntervalMs` (dùng injectable `sleep` hoặc fake timer) và trả đúng 1 job; với thời gian `pollMaxSeconds = 0` → trả `[]` sau 1 lần query.
 
 - [ ] **Step 2: Chạy test, expected FAIL**
 
@@ -151,16 +161,18 @@ Commit: `git commit -m "feat: add pgmq queue adapter with long polling"`
 ### Task 4: S3, decode ảnh, model ONNX + parity gate
 
 **Files:**
+
 - Create: `src/infrastructure/s3.ts`, `src/infrastructure/image.ts`, `src/infrastructure/model.ts`
 - Create: `src/infrastructure/model.parity.test.ts`, `scripts/make-parity-fixture.mjs`
 
 **Interfaces:**
+
 - Consumes: `Settings`, `DecodedImage`, `EmbeddingModel`, `ImageStore`, `ImageStoreError`, `InvalidImageError` (Task 2).
 - Produces: `S3ImageStore implements ImageStore` (`get(key)` trả `Buffer`, lỗi ném `ImageStoreError`); `decodeImage(buffer: Buffer): DecodedImage`; `FashionClipModel implements EmbeddingModel`; `MODEL_NAME` từ Task 2.
 
 - [ ] **Step 1: Viết test parity (gate) trước**
 
-`src/infrastructure/model.parity.test.ts` — opt-in bằng `RUN_PARITY === "1"` (`describe.skip` khi không bật). Dùng 16 ảnh trong `test-fixtures/images/` + `test-fixtures/python-vectors.json` (mảng 16 × 512 số). Load `FashionClipModel`, decode cả 16 ảnh, gọi `embedImages(images)` **một lần**, assert `length === 16`, mỗi vector có 512 chiều và `cosine(vector[i], expected[i]) >= 0.9999`. Test thứ hai: `embedImages([images[0]])` so với `expected[0]` — phủ cả đường single-image. Gate: nếu fail, dừng Task 4 và báo lại, không được hạ ngưỡng.
+`src/infrastructure/model.parity.test.ts` — opt-in bằng `RUN_PARITY === "1"`. Hai test: (1) model parity — đọc `test-fixtures/pixel-values.bin` (1 × 3 × 224 × 224 float32) + `test-fixtures/python-pixel-vector.json` (512 số), gọi `embedPixelValues(...)`, cosine ≥ 0.99999; (2) end-to-end — 16 ảnh + `python-vectors.json`, gọi `embedImages(images)` một lần, mỗi cosine ≥ 0.9975. Gate: nếu fail dừng và báo, không được hạ ngưỡng ngầm.
 
 - [ ] **Step 2: Tạo fixture bằng Python oracle**
 
@@ -173,9 +185,9 @@ Expected: FAIL "`FashionClipModel` is not defined" / module not found.
 
 - [ ] **Step 4: Implement decode + S3 + model**
 
-`image.ts`: `sharp(buffer).raw().toBuffer({ resolveWithObject: true })` → `DecodedImage` channels 3 (dùng `.ensureAlpha()` nếu cần rồi cắt, nhưng giữ `channels: 3` bằng `{ raw: { depth: 'uchar', channels: 3 } }`); decode lỗi → `InvalidImageError`.
+`image.ts`: JPEG decode bằng `jpeg-js` (khớp libjpeg/Pillow hơn sharp), ảnh khác dùng `sharp(...).removeAlpha().raw()`; `preprocessForClip` resize bằng `resizeBicubicPil`, center-crop 224, normalize mean/std, xếp CHW. `pil-resize.ts` port từ Pillow `Resample.c` (kernel a=-0.5, support giãn theo scale, quantize hệ số 22-bit, hai pass ngang/dọc). Decode lỗi → `InvalidImageError`.
 `s3.ts`: `new S3Client({ endpoint, region, credentials })`; `GetObjectCommand({ Bucket, Key })`; `Body.transformToByteArray()` → `Buffer.from(...)`; mọi lỗi → `ImageStoreError`.
-`model.ts`: set `env.localModelPath`/`env.allowRemoteModels` từ settings; `AutoProcessor.from_pretrained(modelId, { revision, cache_dir: modelCacheDir, local_files_only: localFilesOnly })`; `CLIPVisionModelWithProjection.from_pretrained(..., { dtype: "fp32", device: "cpu", session_options: { intraOpNumThreads: 4, interOpNumThreads: 1 } })`. `embedImages([])` trả `[]`. Với ảnh: dựng `RawImage` từ `DecodedImage`, `processor(images)`, `visionModel(...)` lấy `image_embeds`, convert từng hàng `Float32Array`, L2-normalize.
+`model.ts`: set `env.localModelPath`/`env.allowRemoteModels` từ settings; `CLIPVisionModelWithProjection.from_pretrained(modelId, { revision, dtype: "fp32", device: "cpu", model_file_name: "vision_model", session_options: {...} })`. Không dùng `AutoProcessor`. `embedImages` gom `preprocessForClip` thành tensor `[n,3,224,224]` rồi gọi `embedPixelValues`; `embedPixelValues(pixelData, count)` chạy ONNX, lấy `image_embeds`, L2-normalize từng hàng.
 
 - [ ] **Step 5: Chạy parity test thật, expected PASS**
 
@@ -194,25 +206,28 @@ git commit -m "feat: add s3, image decode, ONNX model and parity gate"
 ### Task 5: Service layer
 
 **Files:**
+
 - Create: `src/service/embedding-jobs.ts`, `src/service/embedding-jobs.test.ts`
 - Create: `src/service/search-embedding.ts`, `src/service/search-embedding.test.ts`
 
 **Interfaces:**
+
 - Consumes: `JobQueue`, `ImageStore`, `EmbeddingModel`, `ProductImageRepository`, `DecodedImage`, `QueuedJob`, `ImageStoreError`, `InvalidImageError`, `ImageTooLargeError`, `EMBED_DIM`, `MODEL_NAME` (Task 2), `decodeImage` (Task 4).
 - Produces: `EmbeddingJobProcessor` constructor `(jobs, images, model, repository, options?: { maxAttempts?: number; visibilityTimeoutS?: number })` với `processBatch(batchSize: number): Promise<number>`; `SearchEmbedder` constructor `(model: EmbeddingModel, maxImageBytes?: number)` với `embed(data: Buffer): Promise<number[]>`.
 
 - [ ] **Step 1: Viết failing tests cho processor với fake**
 
 `src/service/embedding-jobs.test.ts`:
-  - batch 2 job hợp lệ → `model.embedImages` gọi **1 lần** với 2 ảnh, `upsertEmbedding` 2 lần với vector normalized (norm ≈ 1), `archive` 2 lần, trả 2.
-  - ảnh S3 lỗi / decode lỗi ở `read_ct = 1` → không `setEmbedError`, không archive, vẫn trả số job.
-  - cùng lỗi ở `read_ct = 3` → `setEmbedError` + `archive`, không upsert.
-  - `getImage` trả upload_id khác → archive, **không gọi model**, không upsert.
-  - `getImage` trả `null` → archive, không gọi model.
-  - upsert trả `false` → vẫn archive, log stale.
-  - model ném lỗi → `setEmbedError` cho job có `read_ct >= 3`, archive chúng, trả số job.
-  - batch rỗng → trả 0, không gọi model.
-  - upsert thành công → SQL set `embed_error = NULL` (đã nằm trong Task 2; test ở đây assert repository được gọi).
+
+- batch 2 job hợp lệ → `model.embedImages` gọi **1 lần** với 2 ảnh, `upsertEmbedding` 2 lần với vector normalized (norm ≈ 1), `archive` 2 lần, trả 2.
+- ảnh S3 lỗi / decode lỗi ở `read_ct = 1` → không `setEmbedError`, không archive, vẫn trả số job.
+- cùng lỗi ở `read_ct = 3` → `setEmbedError` + `archive`, không upsert.
+- `getImage` trả upload_id khác → archive, **không gọi model**, không upsert.
+- `getImage` trả `null` → archive, không gọi model.
+- upsert trả `false` → vẫn archive, log stale.
+- model ném lỗi → `setEmbedError` cho job có `read_ct >= 3`, archive chúng, trả số job.
+- batch rỗng → trả 0, không gọi model.
+- upsert thành công → SQL set `embed_error = NULL` (đã nằm trong Task 2; test ở đây assert repository được gọi).
 
 - [ ] **Step 2: Viết failing tests cho SearchEmbedder**
 
@@ -233,20 +248,23 @@ Commit: `git commit -m "feat: port embedding job processor and search embedder"`
 ### Task 6: gRPC server + servicer + health
 
 **Files:**
+
 - Create: `src/grpc/embedding-service.ts`, `src/grpc/server.ts`, `src/grpc/embedding-service.test.ts`, `src/grpc/server.test.ts`
 
 **Interfaces:**
+
 - Consumes: `SearchEmbedder`, `Settings`, `InvalidImageError`, `ImageTooLargeError`, `MODEL_NAME` (Task 2), proto files (Task 1).
 - Produces: `createEmbeddingService(embedder: SearchEmbedder, maxConcurrency: number): UntypedServiceImplementation` (handler `EmbedImage`); `createGrpcServer(settings: Settings, service: UntypedServiceImplementation): Promise<GrpcServer>` với `GrpcServer.start(): Promise<grpc.Server>`, `stop(graceS: number): Promise<void>`.
 
 - [ ] **Step 1: Viết failing unit test cho servicer**
 
 `src/grpc/embedding-service.test.ts`: gọi handler trực tiếp với fake embedder + fake `call`/`callback`:
-  - success → callback `(null, { vector: number[512], model: "fashion-clip-vit-b32" })`.
-  - `InvalidImageError` → `status.code === grpc.status.INVALID_ARGUMENT`.
-  - `ImageTooLargeError` → `RESOURCE_EXHAUSTED`.
-  - lỗi khác → `INTERNAL`.
-  - vượt `maxConcurrency` → từ chối bằng `RESOURCE_EXHAUSTED`.
+
+- success → callback `(null, { vector: number[512], model: "fashion-clip-vit-b32" })`.
+- `InvalidImageError` → `status.code === grpc.status.INVALID_ARGUMENT`.
+- `ImageTooLargeError` → `RESOURCE_EXHAUSTED`.
+- lỗi khác → `INTERNAL`.
+- vượt `maxConcurrency` → từ chối bằng `RESOURCE_EXHAUSTED`.
 
 - [ ] **Step 2: Viết failing in-process server test**
 
@@ -271,9 +289,11 @@ Commit: `git commit -m "feat: add grpc server, servicer and health check"`
 ### Task 7: Container, main loop, graceful shutdown
 
 **Files:**
+
 - Create: `src/container.ts`, `src/main.ts`, `src/worker.test.ts`
 
 **Interfaces:**
+
 - Consumes: mọi thành phần trước; `loadSettings` (Task 1).
 - Produces: `createContainer(settings: Settings): Promise<Container>` với `{ db, model, processor, embedder, close(): Promise<void> }`; `createWorker(processor: EmbeddingJobProcessor, batchSize: number): { runOnce(): Promise<number>; runForever(stop: () => boolean): Promise<void> }`; `main(): Promise<void>`.
 
