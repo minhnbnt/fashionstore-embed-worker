@@ -199,6 +199,9 @@ importers:
       '@huggingface/transformers':
         specifier: ^4.3.2
         version: 4.3.2(@types/node@26.6.6)
+      onnxruntime-node:
+        specifier: 1.30.0
+        version: 1.30.0
       pg:
         specifier: ^8.23.1
         version: 8.23.1

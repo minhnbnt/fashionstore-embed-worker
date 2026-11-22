@@ -6,8 +6,11 @@ export default defineConfig({
   },
   pack: {
     entry: ["src/main.ts"],
-    deps: { alwaysBundle: [/.*/] },
-    external: [],
+    // sharp / onnxruntime-node có native binary: không được bundle.
+    deps: {
+      alwaysBundle: [/.*/],
+      neverBundle: [/^sharp$/, /^@img\//],
+    },
     minify: true,
     sourcemap: true,
     platform: "node",
